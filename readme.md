@@ -36,7 +36,7 @@ NKUST Local AI 是一套完全本地部署（Local AI）的 AI 平台。
 
 ---
 
-# ✨ 目前功能
+## ✨ 目前功能
 
 目前已完成：
 
@@ -55,9 +55,9 @@ NKUST Local AI 是一套完全本地部署（Local AI）的 AI 平台。
 
 ---
 
-# 📂 專案架構
+## 📂 專案架構
 
-```
+```md
 AI_Server
 │
 ├── agent
@@ -75,9 +75,9 @@ AI_Server
 
 ---
 
-# ⚙️ 系統架構
+## ⚙️ 系統架構
 
-```
+```md
 Knowledge Base
         │
         ▼
@@ -112,7 +112,7 @@ Answer
 
 ---
 
-# 📚 支援文件格式
+## 📚 支援文件格式
 
 目前支援：
 
@@ -130,9 +130,9 @@ Answer
 
 ---
 
-# 🚀 安裝方式
+## 🚀 安裝方式
 
-## 1. Clone Repository
+### 1. Clone Repository
 
 ```bash
 git clone https://github.com/yourname/NKUST_Local_AI.git
@@ -140,7 +140,7 @@ git clone https://github.com/yourname/NKUST_Local_AI.git
 
 ---
 
-## 2. 建立虛擬環境
+### 2. 建立虛擬環境
 
 ```bash
 python -m venv .venv
@@ -154,7 +154,7 @@ Windows：
 
 ---
 
-## 3. 安裝套件
+### 3. 安裝套件
 
 ```bash
 pip install -r requirements.txt
@@ -162,9 +162,9 @@ pip install -r requirements.txt
 
 ---
 
-## 4. 安裝 Ollama
+### 4. 安裝 Ollama
 
-https://ollama.com/
+<https://ollama.com/>
 
 下載後確認：
 
@@ -174,7 +174,7 @@ ollama list
 
 ---
 
-## 5. 下載模型
+### 5. 下載模型
 
 例如：
 
@@ -184,7 +184,7 @@ ollama pull qwen2.5:14b
 
 ---
 
-## 6. 執行
+### 6. 執行
 
 ```bash
 python main.py
@@ -192,33 +192,33 @@ python main.py
 
 ---
 
-# 📁 Knowledge Base
+### 📁 Knowledge Base
 
 將欲建立索引的文件放入：
 
-```
+```md
 knowledge_base/
 ```
 
 完成後執行：
 
-```
+```md
 1. 增量更新索引
 ```
 
 或
 
-```
+```md
 2. 完整重建索引
 ```
 
 ---
 
-# 💬 CLI 使用方式
+## 💬 CLI 使用方式
 
 主選單：
 
-```
+```md
 1. 增量更新索引
 2. 完整重建索引
 3. 進入常駐問答模式
@@ -229,37 +229,37 @@ q. 離開
 
 問答模式：
 
-```
+```md
 back
 ```
 
 回主選單
 
-```
+```md
 rebuild
 ```
 
 增量更新索引
 
-```
+```md
 full_rebuild
 ```
 
 完整重建索引
 
-```
+```md
 memory
 ```
 
 查看最近對話
 
-```
+```md
 clear_memory
 ```
 
 清除最近對話
 
-```
+```md
 q
 ```
 
@@ -267,9 +267,9 @@ q
 
 ---
 
-# 🔍 RAG 流程
+## 🔍 RAG 流程
 
-```
+```md
 Documents
       │
       ▼
@@ -299,16 +299,16 @@ Ollama
 
 ---
 
-# 🗺️ Development Roadmap
+## 🗺️ Development Roadmap
 
-## Phase 1
+### Phase 1
 
 - [x] RAG Engine
 - [x] Hybrid Search
 - [x] Incremental Index
 - [x] Conversation Memory
 
-## Phase 2
+### Phase 2
 
 - [ ] BM25 Hybrid Search
 - [ ] Query Expansion
@@ -316,13 +316,13 @@ Ollama
 - [ ] Confidence Score
 - [ ] Knowledge Manager
 
-## Phase 3
+### Phase 3
 
 - [ ] Notebook Mode
 - [ ] GPT Mode
 - [ ] Agent Mode
 
-## Phase 4
+### Phase 4
 
 - [ ] Web UI
 - [ ] Multi-user
@@ -331,7 +331,7 @@ Ollama
 
 ---
 
-# 📌 專案特色
+## 📌 專案特色
 
 - 完全本地執行
 - 不依賴雲端 API
@@ -341,6 +341,6 @@ Ollama
 
 ---
 
-# 📄 License
+## 📄 License
 
 MIT License
