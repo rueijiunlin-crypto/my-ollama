@@ -135,7 +135,7 @@ Answer
 ### 1. Clone Repository
 
 ```bash
-git clone https://github.com/yourname/NKUST_Local_AI.git
+git clone https://github.com/rueijiunlin-crypto/my-ollama.git
 ```
 
 ---
