@@ -4,7 +4,7 @@ import requests
 OLLAMA_URL = "http://localhost:11434/api/generate"
 MODEL = "qwen2.5-coder:14b"
 
-DATA_DIR = Path("D:/AI_Server/knowledge_base")
+DATA_DIR = Path("G:/AI_Server/knowledge_base")
 
 
 def read_text_files(folder: Path) -> str:
