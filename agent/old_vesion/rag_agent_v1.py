@@ -7,10 +7,10 @@ OLLAMA_URL = "http://localhost:11434/api/generate"
 MODEL = "qwen2.5-coder:14b"
 
 DATA_DIRS = [
-    Path(r"D:\AI_Server\knowledge_base"),
+    Path(r"G:\AI_Server\knowledge_base"),
 ]
 
-DB_DIR = r"D:\AI_Server\agent\chroma_db"
+DB_DIR = r"G:\AI_Server\agent\chroma_db"
 
 embedding_model = SentenceTransformer(
     "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"

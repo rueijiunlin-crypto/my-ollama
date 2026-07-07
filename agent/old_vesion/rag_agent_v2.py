@@ -19,10 +19,10 @@ MODEL = "qwen2.5:14b"
 # MODEL = "qwen2.5-coder:14b"
 
 DATA_DIRS = [
-    Path(r"D:\AI_Server\knowledge_base"),
+    Path(r"G:\AI_Server\knowledge_base"),
 ]
 
-DB_DIR = r"D:\AI_Server\agent\chroma_db"
+DB_DIR = r"G:\AI_Server\agent\chroma_db"
 COLLECTION_NAME = "nkust_knowledge"
 EMBEDDING_MODEL = "BAAI/bge-m3"
 
