@@ -18,11 +18,37 @@ except ModuleNotFoundError:
     BM25Okapi = None
 
 
-def tokenize_for_bm25(text: str) -> list[str]:
+def tokenize_text(text: str) -> list[str]:
+    """將中英文混合文字轉成 BM25 與關鍵字比對共用的 tokens。"""
     normalized = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text)
-    normalized = normalized.replace("::", " ")
-    tokens = re.split(r"[^0-9A-Za-z\u4e00-\u9fff]+", normalized.lower())
-    return [token for token in tokens if len(token) >= 2]
+    raw_tokens = re.findall(
+        r"[A-Za-z0-9_]+|[\u4e00-\u9fff]+",
+        normalized,
+    )
+
+    tokens: list[str] = []
+
+    def add_token(token: str) -> None:
+        normalized_token = token.lower().strip("_")
+        if len(normalized_token) >= 2 and normalized_token not in tokens:
+            tokens.append(normalized_token)
+
+    for raw_token in raw_tokens:
+        if re.fullmatch(r"[\u4e00-\u9fff]+", raw_token):
+            add_token(raw_token)
+            for index in range(len(raw_token) - 1):
+                add_token(raw_token[index:index + 2])
+            continue
+
+        add_token(raw_token)
+        for part in raw_token.split("_"):
+            add_token(part)
+
+    return tokens
+
+
+def tokenize_for_bm25(text: str) -> list[str]:
+    return tokenize_text(text)
 
 
 def normalize_scores(values: list[float]) -> list[float]:
@@ -38,30 +64,26 @@ def normalize_scores(values: list[float]) -> list[float]:
 
 
 def keyword_score(question: str, document: str, metadata: dict) -> float:
-    tokens = [
-        token.lower()
-        for token in re.split(r"[\s/\\_:.\-()[\]{}<>#嚗?嚗?;]+", question)
-        if len(token.strip()) >= 2
-    ]
+    tokens = tokenize_text(question)
     if not tokens:
         return 0.0
 
-    document_lower = document.lower()
-    file_name = str(metadata.get("file_name", "")).lower()
-    function_or_class = str(metadata.get("function_or_class", "")).lower()
-    section_title = str(metadata.get("section_title", "")).lower()
+    document_tokens = set(tokenize_text(document))
+    file_name_tokens = set(tokenize_text(str(metadata.get("file_name", ""))))
+    function_tokens = set(tokenize_text(str(metadata.get("function_or_class", ""))))
+    section_tokens = set(tokenize_text(str(metadata.get("section_title", ""))))
 
     score = 0.0
-    max_score = len(tokens) * 4.5
+    max_score = len(tokens) * 6.5
 
     for token in tokens:
-        if token in document_lower:
+        if token in document_tokens:
             score += 1.0
-        if token in file_name:
+        if token in file_name_tokens:
             score += 1.5
-        if token in function_or_class:
+        if token in function_tokens:
             score += 2.0
-        if token in section_title:
+        if token in section_tokens:
             score += 2.0
 
     return min(score / max_score, 1.0)
@@ -269,9 +291,10 @@ def retrieve_docs(question: str) -> list[dict]:
             for candidate, score in zip(candidates, scores):
                 rerank_score = float(score)
                 candidate["rerank_score"] = rerank_score
+                # BM25 僅負責候選召回；啟用 Reranker 時由語意重排主導，
+                # Keyword 僅提供極小幅度的精準詞彙加權。
                 candidate["final_score"] = (
                     RERANK_WEIGHT * rerank_score
-                    + BM25_WEIGHT * candidate["bm25_score"]
                     + KEYWORD_WEIGHT * candidate["keyword_score"]
                 )
         except Exception as exc:
