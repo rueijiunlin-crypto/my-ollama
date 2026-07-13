@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Any
 
 from config import SUPPORTED_EXTENSIONS
+from rag_engine.path_filter import iter_source_files
 
 try:
     from docx import Document
@@ -113,7 +114,7 @@ def read_files(folders: list[Path]) -> list[dict]:
             print(f"找不到資料夾：{folder}")
             continue
 
-        for path in folder.rglob("*"):
+        for path in iter_source_files(folder):
             if not path.is_file():
                 continue
 

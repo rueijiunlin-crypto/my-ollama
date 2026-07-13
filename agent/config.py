@@ -40,3 +40,19 @@ SUPPORTED_EXTENSIONS = {
     ".pdf",
     ".docx",
 }
+
+# 索引掃描時一律略過的目錄名稱（不分大小寫）。
+EXCLUDED_DIR_NAMES = {
+    ".venv",
+    "venv",
+    "env",
+    "__pycache__",
+    ".git",
+    ".vscode",
+    ".idea",
+    "site-packages",
+    "chroma_db",
+    "node_modules",
+    "old_version",
+    "old vesion",
+}

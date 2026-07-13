@@ -1,10 +1,14 @@
 import os
+import tempfile
+from pathlib import Path
 
 os.environ["RAG_AGENT_SKIP_MODEL_LOAD"] = "1"
 
 from rag_engine.chunker import split_markdown, split_python
 from rag_engine.formatter import format_context
 from rag_engine import retriever
+from rag_engine.manifest import scan_source_files
+from rag_engine.path_filter import is_excluded_path
 from rag_engine.retriever import (
     bm25_search,
     keyword_score,
@@ -73,6 +77,32 @@ def test_normalize_scores() -> None:
     assert scores == [0.0, 0.5, 1.0]
     assert normalize_scores([]) == []
     assert normalize_scores([5, 5]) == [1.0, 1.0]
+
+
+def test_excluded_paths() -> None:
+    assert is_excluded_path(Path("project/.venv/Lib/site-packages/example.py"))
+    assert is_excluded_path(Path("project/.git/config"))
+    assert is_excluded_path(Path("project/chroma_db/chroma.sqlite3"))
+    assert not is_excluded_path(Path("project/knowledge_base/note.md"))
+
+
+def test_scan_source_files_excludes_directories() -> None:
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        root = Path(temporary_directory)
+        included = root / "knowledge_base" / "note.md"
+        excluded_venv = root / ".venv" / "Lib" / "site-packages" / "package.py"
+        excluded_git = root / ".git" / "hook.py"
+        excluded_chroma = root / "chroma_db" / "internal.py"
+
+        for path in (included, excluded_venv, excluded_git, excluded_chroma):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("test", encoding="utf-8")
+
+        results = scan_source_files([root])
+
+        assert results == [included]
+        assert all(".venv" not in str(path) for path in results)
+        assert all("site-packages" not in str(path) for path in results)
 
 
 def test_bm25_search_with_fake_documents() -> None:
@@ -179,6 +209,8 @@ def main() -> None:
     test_keyword_score()
     test_tokenize_for_bm25()
     test_normalize_scores()
+    test_excluded_paths()
+    test_scan_source_files_excludes_directories()
     test_bm25_search_with_fake_documents()
     test_retrieve_docs_includes_bm25_fields()
     test_format_context()

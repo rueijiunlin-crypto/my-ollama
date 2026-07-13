@@ -4,6 +4,7 @@ from pathlib import Path
 
 from config import COLLECTION_NAME, DATA_DIRS, EMBEDDING_MODEL, MANIFEST_PATH, SUPPORTED_EXTENSIONS
 from rag_engine.models import get_collection
+from rag_engine.path_filter import iter_source_files
 
 
 def calculate_file_sha256(path: Path) -> str:
@@ -66,7 +67,7 @@ def scan_source_files(folders: list[Path]) -> list[Path]:
             print(f"找不到資料夾：{folder}")
             continue
 
-        for path in folder.rglob("*"):
+        for path in iter_source_files(folder):
             if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS:
                 files.append(path)
 
