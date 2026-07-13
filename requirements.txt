@@ -3,3 +3,4 @@ chromadb
 sentence-transformers
 pypdf
 python-docx
+rank-bm25
