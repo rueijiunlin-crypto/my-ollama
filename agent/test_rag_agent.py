@@ -15,6 +15,7 @@ from rag_engine.retriever import (
     normalize_scores,
     retrieve_docs,
     tokenize_for_bm25,
+    tokenize_text,
 )
 
 
@@ -49,7 +50,7 @@ def build_index():
 
 def test_keyword_score() -> None:
     score = keyword_score(
-        "build_index search",
+        "build_index是什麼",
         "This document explains the search pipeline.",
         {
             "file_name": "rag_agent.py",
@@ -58,6 +59,19 @@ def test_keyword_score() -> None:
         },
     )
     assert score > 0
+
+
+def test_mixed_language_tokenizer() -> None:
+    token_query = tokenize_text("token是啥")
+    assert "token" in token_query
+    assert "是啥" in token_query
+
+    function_query = tokenize_text("build_index是什麼")
+    assert "build_index" in function_query
+    assert "build" in function_query
+    assert "index" in function_query
+    assert "是什" in function_query
+    assert "什麼" in function_query
 
 
 def test_tokenize_for_bm25() -> None:
@@ -175,6 +189,34 @@ def test_retrieve_docs_includes_bm25_fields() -> None:
     assert "retrieval_source" in results[0]
 
 
+class FakeReranker:
+    def predict(self, pairs):
+        return [0.5 for _ in pairs]
+
+
+def test_reranker_final_score_uses_keyword_only_as_small_bonus() -> None:
+    original_get_collection = retriever.get_collection
+    original_encode_text = retriever.encode_text
+    original_get_reranker_model = retriever.get_reranker_model
+
+    retriever.get_collection = lambda: FakeCollection()
+    retriever.encode_text = lambda text: [0.1, 0.2]
+    retriever.get_reranker_model = lambda: FakeReranker()
+
+    try:
+        results = retrieve_docs("build_index是什麼")
+    finally:
+        retriever.get_collection = original_get_collection
+        retriever.encode_text = original_encode_text
+        retriever.get_reranker_model = original_get_reranker_model
+
+    assert results
+    top_result = results[0]
+    expected = 0.5 + retriever.KEYWORD_WEIGHT * top_result["keyword_score"]
+    assert abs(top_result["final_score"] - expected) < 1e-9
+    assert top_result["bm25_score"] > 0
+
+
 def test_format_context() -> None:
     context = format_context(
         [
@@ -207,12 +249,14 @@ def main() -> None:
     test_split_markdown()
     test_split_python()
     test_keyword_score()
+    test_mixed_language_tokenizer()
     test_tokenize_for_bm25()
     test_normalize_scores()
     test_excluded_paths()
     test_scan_source_files_excludes_directories()
     test_bm25_search_with_fake_documents()
     test_retrieve_docs_includes_bm25_fields()
+    test_reranker_final_score_uses_keyword_only_as_small_bonus()
     test_format_context()
     print("All tests passed.")
 
