@@ -26,6 +26,13 @@ KEYWORD_WEIGHT = 0.03
 CONVERSATION_MEMORY_SIZE = 5
 SKIP_MODEL_LOAD = os.environ.get("RAG_AGENT_SKIP_MODEL_LOAD") == "1"
 
+# 檢索品質門檻。這些數值用於拒絕明顯缺乏證據的問題，之後可透過
+# 真實問題集校準；不應將 final_score 當成機率或回答可信度。
+MIN_RERANK_SCORE = 0.15
+MIN_FALLBACK_FINAL_SCORE = 0.20
+MIN_BM25_SCORE = 0.50
+MIN_KEYWORD_SCORE = 0.15
+
 SUPPORTED_EXTENSIONS = {
     ".txt",
     ".md",

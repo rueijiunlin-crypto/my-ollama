@@ -1,9 +1,5 @@
 import sys
 
-import chromadb
-import torch
-from sentence_transformers import CrossEncoder, SentenceTransformer
-
 from config import (
     COLLECTION_NAME,
     DB_DIR,
@@ -13,7 +9,19 @@ from config import (
     SKIP_MODEL_LOAD,
 )
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+if SKIP_MODEL_LOAD:
+    # 單元測試只驗證純 Python 邏輯，不需要載入大型模型與 ChromaDB。
+    chromadb = None
+    torch = None
+    CrossEncoder = None
+    SentenceTransformer = None
+    DEVICE = "cpu"
+else:
+    import chromadb
+    import torch
+    from sentence_transformers import CrossEncoder, SentenceTransformer
+
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 embedding_model = None
 reranker_model = None

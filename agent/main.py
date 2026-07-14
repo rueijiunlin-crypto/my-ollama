@@ -1,11 +1,16 @@
 from config import CONVERSATION_MEMORY_SIZE
-from llm.ollama_client import ask_ollama
+from llm.ollama_client import ask_ollama, check_ollama_health
 from memory import ConversationMemory
+from rag_engine.citation import append_source_list
+from rag_engine.formatter import format_context
 from rag_engine.indexer import build_index
-from rag_engine.retriever import search_docs
+from rag_engine.retriever import evaluate_retrieval_quality, retrieve_docs
 
 
 def main() -> None:
+    health = check_ollama_health()
+    print(f"\nOllama 狀態：{health['message']}")
+
     while True:
         print("\n=== NKUST Local RAG Agent v0.6 ===")
         print("1. 增量更新索引")
@@ -70,8 +75,24 @@ def main() -> None:
                     continue
 
                 try:
-                    context = search_docs(question)
+                    results = retrieve_docs(question)
+                    quality = evaluate_retrieval_quality(results)
+                    context = format_context(results)
+
+                    if not quality["accepted"]:
+                        print("\n=== 檢索內容 ===\n")
+                        print(context)
+                        print("\n=== Agent 回答 ===\n")
+                        print(quality["reason"])
+                        continue
+
+                    health = check_ollama_health()
+                    if not health["available"] or not health["model_available"]:
+                        print(f"\n無法產生回答：{health['message']}")
+                        continue
+
                     answer = ask_ollama(question, context, memory.to_list())
+                    answer = append_source_list(answer, results)
                 except Exception as exc:
                     print(f"問答時發生錯誤：{exc}")
                     continue

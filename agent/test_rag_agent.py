@@ -5,18 +5,21 @@ from pathlib import Path
 os.environ["RAG_AGENT_SKIP_MODEL_LOAD"] = "1"
 
 from rag_engine.chunker import split_markdown, split_python
+from rag_engine.citation import append_source_list, format_source_list
 from rag_engine.formatter import format_context
 from rag_engine import retriever
 from rag_engine.manifest import scan_source_files
 from rag_engine.path_filter import is_excluded_path
 from rag_engine.retriever import (
     bm25_search,
+    evaluate_retrieval_quality,
     keyword_score,
     normalize_scores,
     retrieve_docs,
     tokenize_for_bm25,
     tokenize_text,
 )
+from llm import ollama_client
 
 
 def test_split_markdown() -> None:
@@ -238,11 +241,95 @@ def test_format_context() -> None:
             }
         ]
     )
-    assert "Source:" in context
-    assert "File:" in context
-    assert "Retrieval:" in context
-    assert "BM25 score:" in context
-    assert "Final score:" in context
+    assert "[來源 1]" in context
+    assert "來源：" in context
+    assert "檔案：" in context
+    assert "檢索來源：" in context
+    assert "BM25 分數：" in context
+    assert "最終排序分數：" in context
+
+
+def test_citation_source_list() -> None:
+    results = [
+        {
+            "document": "Token 是模型處理文字的基本單位。",
+            "metadata": {
+                "source_path": r"G:\AI_Server\knowledge_base\notes.md",
+                "file_name": "notes.md",
+                "section_title": "Token",
+                "page_number": 3,
+            },
+        }
+    ]
+    sources = format_source_list(results)
+    assert "[來源 1]" in sources
+    assert "notes.md" in sources
+    assert "章節：Token" in sources
+    assert "頁碼：3" in sources
+
+    answer = append_source_list("Token 是基本單位。[來源 1]", results)
+    assert answer.count("參考來源：") == 1
+    assert "---" in answer
+
+
+def test_retrieval_quality_accepts_semantic_evidence() -> None:
+    quality = evaluate_retrieval_quality(
+        [
+            {
+                "rerank_score": 0.95,
+                "bm25_score": 0.0,
+                "keyword_score": 0.0,
+                "final_score": 0.95,
+            }
+        ]
+    )
+    assert quality["accepted"] is True
+    assert quality["relevant_count"] == 1
+
+
+def test_retrieval_quality_rejects_weak_evidence() -> None:
+    quality = evaluate_retrieval_quality(
+        [
+            {
+                "rerank_score": 0.0001,
+                "bm25_score": 0.2,
+                "keyword_score": 0.0,
+                "final_score": 0.0001,
+            }
+        ]
+    )
+    assert quality["accepted"] is False
+    assert "沒有找到足夠可靠" in quality["reason"]
+
+
+def test_ollama_health_check_finds_configured_model() -> None:
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {"models": [{"name": ollama_client.MODEL}]}
+
+    class FakeRequests:
+        class RequestException(Exception):
+            pass
+
+        @staticmethod
+        def get(url: str, timeout: float):
+            assert url.endswith("/api/tags")
+            assert timeout > 0
+            return FakeResponse()
+
+    original_requests = ollama_client.requests
+    ollama_client.requests = FakeRequests
+    try:
+        health = ollama_client.check_ollama_health()
+    finally:
+        ollama_client.requests = original_requests
+
+    assert health["available"] is True
+    assert health["model_available"] is True
+    assert ollama_client.MODEL in health["message"]
 
 
 def main() -> None:
@@ -258,6 +345,10 @@ def main() -> None:
     test_retrieve_docs_includes_bm25_fields()
     test_reranker_final_score_uses_keyword_only_as_small_bonus()
     test_format_context()
+    test_citation_source_list()
+    test_retrieval_quality_accepts_semantic_evidence()
+    test_retrieval_quality_rejects_weak_evidence()
+    test_ollama_health_check_finds_configured_model()
     print("All tests passed.")
 
 

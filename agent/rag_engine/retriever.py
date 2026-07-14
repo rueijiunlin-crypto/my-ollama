@@ -5,6 +5,10 @@ from config import (
     BM25_TOP_K,
     BM25_WEIGHT,
     KEYWORD_WEIGHT,
+    MIN_BM25_SCORE,
+    MIN_FALLBACK_FINAL_SCORE,
+    MIN_KEYWORD_SCORE,
+    MIN_RERANK_SCORE,
     RERANK_TOP_K,
     RERANK_WEIGHT,
     VECTOR_SEARCH_TOP_K,
@@ -317,6 +321,81 @@ def retrieve_docs(question: str) -> list[dict]:
     for candidate in candidates:
         candidate.pop("_retrieval_sources", None)
     return candidates[:RERANK_TOP_K]
+
+
+def evaluate_retrieval_quality(results: list[dict]) -> dict:
+    """判斷檢索證據是否足以交給 LLM，不將排序分數誤當成機率。"""
+    if not results:
+        return {
+            "accepted": False,
+            "reason": "知識庫中沒有找到相關資料。",
+            "top_rerank_score": None,
+            "top_final_score": None,
+            "relevant_count": 0,
+        }
+
+    semantic_hits = [
+        item
+        for item in results
+        if item.get("rerank_score") is not None
+        and float(item["rerank_score"]) >= MIN_RERANK_SCORE
+    ]
+    lexical_hits = [
+        item
+        for item in results
+        if float(item.get("bm25_score", 0.0)) >= MIN_BM25_SCORE
+        and float(item.get("keyword_score", 0.0)) >= MIN_KEYWORD_SCORE
+    ]
+    fallback_hits = [
+        item
+        for item in results
+        if item.get("rerank_score") is None
+        and float(item.get("final_score", 0.0)) >= MIN_FALLBACK_FINAL_SCORE
+    ]
+
+    accepted = bool(semantic_hits or lexical_hits or fallback_hits)
+    relevant_count = sum(
+        1
+        for item in results
+        if (
+            (
+                item.get("rerank_score") is not None
+                and float(item["rerank_score"]) >= MIN_RERANK_SCORE
+            )
+            or (
+                float(item.get("bm25_score", 0.0)) >= MIN_BM25_SCORE
+                and float(item.get("keyword_score", 0.0)) >= MIN_KEYWORD_SCORE
+            )
+            or (
+                item.get("rerank_score") is None
+                and float(item.get("final_score", 0.0)) >= MIN_FALLBACK_FINAL_SCORE
+            )
+        )
+    )
+    top_rerank = max(
+        (
+            float(item["rerank_score"])
+            for item in results
+            if item.get("rerank_score") is not None
+        ),
+        default=None,
+    )
+    top_final = max(
+        (float(item.get("final_score", 0.0)) for item in results),
+        default=None,
+    )
+
+    return {
+        "accepted": accepted,
+        "reason": (
+            "檢索結果具備足夠相關證據。"
+            if accepted
+            else "目前知識庫中沒有找到足夠可靠的資料，請補充資料或重新描述問題。"
+        ),
+        "top_rerank_score": top_rerank,
+        "top_final_score": top_final,
+        "relevant_count": relevant_count,
+    }
 
 
 def search_docs(question: str) -> str:
