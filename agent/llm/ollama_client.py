@@ -1,6 +1,6 @@
 from urllib.parse import urlsplit
 
-from config import MODEL, OLLAMA_URL, SKIP_MODEL_LOAD
+from config import MODEL, OLLAMA_URL, QUERY_REWRITE_ENABLED, SKIP_MODEL_LOAD
 
 try:
     import requests
@@ -116,3 +116,43 @@ def ask_ollama(question: str, context: str, history: list[dict] | None = None) -
 
     response.raise_for_status()
     return response.json()["response"]
+
+
+def rewrite_query(question: str, history: list[dict] | None = None) -> str:
+    """將依賴前文的問題改寫成可獨立檢索的問題；失敗時回傳原問題。"""
+    if not QUERY_REWRITE_ENABLED or not history or requests is None:
+        return question
+
+    recent_history = history[-3:]
+    history_text = "\n\n".join(
+        f"Q: {item.get('question', '')}\nA: {item.get('answer', '')}"
+        for item in recent_history
+    )
+    prompt = f"""
+你是 RAG 查詢改寫器。請根據最近對話，把本輪問題改寫成一個語意完整、
+可獨立搜尋知識庫的繁體中文問題。
+
+規則：
+1. 只補全代名詞、省略主詞與必要術語。
+2. 不回答問題，不新增對話中沒有的事實。
+3. 若原問題已完整，原樣輸出。
+4. 只輸出改寫後問題，不要加入解釋或引號。
+
+最近對話：
+{history_text}
+
+本輪問題：
+{question}
+"""
+
+    try:
+        response = requests.post(
+            OLLAMA_URL,
+            json={"model": MODEL, "prompt": prompt, "stream": False},
+            timeout=120,
+        )
+        response.raise_for_status()
+        rewritten = str(response.json().get("response", "")).strip()
+        return rewritten or question
+    except (requests.RequestException, ValueError, KeyError):
+        return question

@@ -1,10 +1,15 @@
 import re
+from collections import defaultdict
 
 from config import (
     BM25_ENABLED,
     BM25_TOP_K,
     BM25_WEIGHT,
+    CONTEXT_SIMILARITY_THRESHOLD,
+    FILTERABLE_METADATA_FIELDS,
     KEYWORD_WEIGHT,
+    MAX_CHUNKS_PER_SOURCE,
+    MAX_CONTEXT_CHARACTERS,
     MIN_BM25_SCORE,
     MIN_FALLBACK_FINAL_SCORE,
     MIN_KEYWORD_SCORE,
@@ -20,6 +25,25 @@ try:
     from rank_bm25 import BM25Okapi
 except ModuleNotFoundError:
     BM25Okapi = None
+
+
+_BM25_CACHE: dict = {
+    "collection_count": -1,
+    "documents": [],
+    "tokenized_corpus": [],
+    "model": None,
+}
+
+
+def invalidate_bm25_cache() -> None:
+    _BM25_CACHE.update(
+        {
+            "collection_count": -1,
+            "documents": [],
+            "tokenized_corpus": [],
+            "model": None,
+        }
+    )
 
 
 def tokenize_text(text: str) -> list[str]:
@@ -165,12 +189,86 @@ def load_all_indexed_documents() -> list[dict]:
     return indexed_documents
 
 
+def _get_bm25_cache() -> dict:
+    collection = get_collection()
+    if collection is None:
+        return _BM25_CACHE
+
+    collection_count = collection.count()
+    if (
+        _BM25_CACHE["collection_count"] == collection_count
+        and _BM25_CACHE["documents"]
+    ):
+        return _BM25_CACHE
+
+    documents = load_all_indexed_documents()
+    tokenized_corpus = [
+        tokenize_for_bm25(item.get("document", ""))
+        for item in documents
+    ]
+    model = BM25Okapi(tokenized_corpus) if BM25Okapi is not None and documents else None
+    _BM25_CACHE.update(
+        {
+            "collection_count": collection_count,
+            "documents": documents,
+            "tokenized_corpus": tokenized_corpus,
+            "model": model,
+        }
+    )
+    return _BM25_CACHE
+
+
+def normalize_metadata_filter(metadata_filter: dict | None) -> dict:
+    if not metadata_filter:
+        return {}
+
+    normalized: dict[str, str] = {}
+    for key, value in metadata_filter.items():
+        if key not in FILTERABLE_METADATA_FIELDS:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        if key == "file_type" and not text.startswith("."):
+            text = f".{text}"
+        normalized[key] = text
+    return normalized
+
+
+def metadata_matches(metadata: dict, metadata_filter: dict | None) -> bool:
+    normalized = normalize_metadata_filter(metadata_filter)
+    return all(
+        str(metadata.get(key, "")).casefold() == value.casefold()
+        for key, value in normalized.items()
+    )
+
+
+def _chroma_where(metadata_filter: dict | None) -> dict | None:
+    normalized = normalize_metadata_filter(metadata_filter)
+    conditions = [{key: value} for key, value in normalized.items()]
+    if not conditions:
+        return None
+    if len(conditions) == 1:
+        return conditions[0]
+    return {"$and": conditions}
+
+
 def bm25_search(
     question: str,
     top_k: int = BM25_TOP_K,
     indexed_documents: list[dict] | None = None,
+    metadata_filter: dict | None = None,
 ) -> list[dict]:
-    documents = indexed_documents if indexed_documents is not None else load_all_indexed_documents()
+    if indexed_documents is not None:
+        documents = indexed_documents
+        tokenized_corpus = [tokenize_for_bm25(item.get("document", "")) for item in documents]
+        bm25_model = BM25Okapi(tokenized_corpus) if BM25Okapi is not None and documents else None
+    else:
+        cache = _get_bm25_cache()
+        documents = cache["documents"]
+        tokenized_corpus = cache["tokenized_corpus"]
+        bm25_model = cache["model"]
+
     if not documents:
         return []
 
@@ -178,10 +276,8 @@ def bm25_search(
     if not query_tokens:
         return []
 
-    tokenized_corpus = [tokenize_for_bm25(item.get("document", "")) for item in documents]
-    if BM25Okapi is not None:
-        bm25 = BM25Okapi(tokenized_corpus)
-        raw_scores = [float(score) for score in bm25.get_scores(query_tokens)]
+    if bm25_model is not None:
+        raw_scores = [float(score) for score in bm25_model.get_scores(query_tokens)]
     else:
         raw_scores = _fallback_bm25_scores(tokenized_corpus, query_tokens)
 
@@ -189,6 +285,8 @@ def bm25_search(
     ranked: list[dict] = []
     for item, score in zip(documents, normalized):
         if score <= 0:
+            continue
+        if not metadata_matches(item.get("metadata", {}), metadata_filter):
             continue
 
         ranked.append(
@@ -239,7 +337,57 @@ def _merge_candidate(candidates: dict[str, dict], candidate: dict, source: str) 
     existing["retrieval_source"] = ",".join(sorted(existing_sources))
 
 
-def retrieve_docs(question: str) -> list[dict]:
+def _text_similarity(left: str, right: str) -> float:
+    left_tokens = set(tokenize_text(left))
+    right_tokens = set(tokenize_text(right))
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
+
+
+def select_diverse_results(results: list[dict], limit: int = RERANK_TOP_K) -> list[dict]:
+    selected: list[dict] = []
+    source_counts: defaultdict[str, int] = defaultdict(int)
+    used_parent_ids: set[str] = set()
+    total_characters = 0
+
+    for candidate in results:
+        metadata = candidate.get("metadata", {})
+        source = str(metadata.get("source_path", ""))
+        parent_id = str(metadata.get("parent_id", ""))
+        parent_text = str(metadata.get("parent_text", "") or candidate.get("document", ""))
+
+        if parent_id and parent_id in used_parent_ids:
+            continue
+        if source_counts[source] >= MAX_CHUNKS_PER_SOURCE:
+            continue
+        if any(
+            _text_similarity(parent_text, item.get("document", ""))
+            >= CONTEXT_SIMILARITY_THRESHOLD
+            for item in selected
+        ):
+            continue
+        if selected and total_characters + len(parent_text) > MAX_CONTEXT_CHARACTERS:
+            continue
+
+        expanded = dict(candidate)
+        expanded["matched_child"] = candidate.get("document", "")
+        expanded["document"] = parent_text
+        expanded_metadata = dict(metadata)
+        expanded_metadata.pop("parent_text", None)
+        expanded["metadata"] = expanded_metadata
+        selected.append(expanded)
+        source_counts[source] += 1
+        total_characters += len(parent_text)
+        if parent_id:
+            used_parent_ids.add(parent_id)
+        if len(selected) >= limit:
+            break
+
+    return selected
+
+
+def retrieve_docs(question: str, metadata_filter: dict | None = None) -> list[dict]:
     collection = get_collection()
     if collection is None:
         return []
@@ -249,11 +397,22 @@ def retrieve_docs(question: str) -> list[dict]:
         return []
 
     query_embedding = encode_text(question)
-    results = collection.query(
-        query_embeddings=[query_embedding],
-        n_results=min(VECTOR_SEARCH_TOP_K, total_docs),
-        include=["documents", "metadatas", "distances"],
-    )
+    query_kwargs = {
+        "query_embeddings": [query_embedding],
+        "n_results": min(VECTOR_SEARCH_TOP_K, total_docs),
+        "include": ["documents", "metadatas", "distances"],
+    }
+    where = _chroma_where(metadata_filter)
+    if where:
+        query_kwargs["where"] = where
+
+    try:
+        results = collection.query(**query_kwargs)
+    except Exception as exc:
+        if where:
+            print(f"Metadata Filter 查詢失敗：{exc}")
+            return []
+        raise
 
     documents = results.get("documents", [[]])[0]
     metadatas = results.get("metadatas", [[]])[0]
@@ -275,7 +434,11 @@ def retrieve_docs(question: str) -> list[dict]:
         )
 
     if BM25_ENABLED:
-        for candidate in bm25_search(question, BM25_TOP_K):
+        for candidate in bm25_search(
+            question,
+            BM25_TOP_K,
+            metadata_filter=metadata_filter,
+        ):
             candidate["keyword_score"] = keyword_score(
                 question,
                 candidate.get("document", ""),
@@ -320,7 +483,7 @@ def retrieve_docs(question: str) -> list[dict]:
     candidates.sort(key=lambda item: item["final_score"], reverse=True)
     for candidate in candidates:
         candidate.pop("_retrieval_sources", None)
-    return candidates[:RERANK_TOP_K]
+    return select_diverse_results(candidates, RERANK_TOP_K)
 
 
 def evaluate_retrieval_quality(results: list[dict]) -> dict:
@@ -398,5 +561,5 @@ def evaluate_retrieval_quality(results: list[dict]) -> dict:
     }
 
 
-def search_docs(question: str) -> str:
-    return format_context(retrieve_docs(question))
+def search_docs(question: str, metadata_filter: dict | None = None) -> str:
+    return format_context(retrieve_docs(question, metadata_filter=metadata_filter))

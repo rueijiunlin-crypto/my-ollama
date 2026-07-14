@@ -113,5 +113,21 @@ def encode_text(text: str) -> list[float]:
         normalize_embeddings=True,
     ).tolist()
 
+
+def encode_texts(texts: list[str], batch_size: int = 16) -> list[list[float]]:
+    model = get_embedding_model()
+    if model is None:
+        raise RuntimeError("Embedding 模型尚未載入。")
+    if not texts:
+        return []
+
+    embeddings = model.encode(
+        texts,
+        batch_size=batch_size,
+        normalize_embeddings=True,
+        show_progress_bar=False,
+    )
+    return embeddings.tolist()
+
 if not SKIP_MODEL_LOAD:
     print_runtime_info()

@@ -1,8 +1,9 @@
 import json
+import re
 from pathlib import Path
 from typing import Any
 
-from config import SUPPORTED_EXTENSIONS
+from config import DATA_DIRS, SUPPORTED_EXTENSIONS
 from rag_engine.path_filter import iter_source_files
 
 try:
@@ -74,21 +75,54 @@ def read_ipynb(path: Path) -> str:
 
 
 def _base_metadata(path: Path) -> dict[str, Any]:
-    return {
+    metadata: dict[str, Any] = {
         "source_path": str(path),
         "file_name": path.name,
         "file_type": path.suffix.lower(),
         "folder_name": path.parent.name,
     }
 
+    for root in DATA_DIRS:
+        try:
+            relative_path = path.resolve().relative_to(root.resolve())
+        except (OSError, ValueError):
+            continue
+
+        relative_parts = relative_path.parts
+        relative_text = str(relative_path)
+        week_match = re.search(r"(?i)week[\s_-]?(\d+)", relative_text)
+        metadata.update(
+            {
+                "root_source": root.name,
+                "relative_path": relative_text,
+                "project": root.parent.name if root.name.lower() == "learning" else root.name,
+                "module": relative_parts[0] if len(relative_parts) > 1 else path.stem,
+                "week": f"Week{int(week_match.group(1)):02d}" if week_match else "",
+            }
+        )
+        break
+
+    metadata.setdefault("root_source", path.parent.name)
+    metadata.setdefault("relative_path", path.name)
+    metadata.setdefault("project", path.parent.name)
+    metadata.setdefault("module", path.stem)
+    metadata.setdefault("week", "")
+    return metadata
+
 
 def _read_pdf_pages(path: Path, metadata: dict[str, Any]) -> list[dict[str, Any]]:
     reader = PdfReader(str(path))
     docs: list[dict[str, Any]] = []
 
+    total_pages = len(reader.pages)
+    extracted_pages = 0
+    total_characters = 0
+
     for page_number, page in enumerate(reader.pages, start=1):
         text = page.extract_text() or ""
         if text.strip():
+            extracted_pages += 1
+            total_characters += len(text.strip())
             docs.append(
                 {
                     "path": path,
@@ -96,12 +130,29 @@ def _read_pdf_pages(path: Path, metadata: dict[str, Any]) -> list[dict[str, Any]
                     "metadata": {
                         **metadata,
                         "page_number": page_number,
+                        "pdf_total_pages": total_pages,
                     },
                 }
             )
 
     if not docs:
-        docs.append({"path": path, "text": "", "metadata": metadata})
+        docs.append(
+            {
+                "path": path,
+                "text": "",
+                "metadata": {**metadata, "pdf_total_pages": total_pages},
+            }
+        )
+
+    empty_pages = total_pages - extracted_pages
+    average_characters = total_characters / extracted_pages if extracted_pages else 0.0
+    print(f"PDF 擷取品質：{path}")
+    print(f"總頁數：{total_pages}")
+    print(f"成功擷取頁數：{extracted_pages}")
+    print(f"空白頁數：{empty_pages}")
+    print(f"平均每個有效頁面字數：{average_characters:.1f}")
+    if total_pages and extracted_pages / total_pages < 0.5:
+        print("警告：可擷取文字的頁面比例偏低，這份 PDF 可能需要 OCR。")
 
     return docs
 

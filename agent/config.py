@@ -8,6 +8,7 @@ MODEL = "qwen2.5:14b"
 DATA_DIRS = [
     Path(r"G:\NKUST_VLM\learning"),
     Path(r"G:\AI_Server\knowledge_base"),
+    Path(r"G:\AI_Server\README.md"),
 ]
 
 DB_DIR = r"G:\AI_Server\agent\chroma_db"
@@ -32,6 +33,31 @@ MIN_RERANK_SCORE = 0.15
 MIN_FALLBACK_FINAL_SCORE = 0.20
 MIN_BM25_SCORE = 0.50
 MIN_KEYWORD_SCORE = 0.15
+
+# 第二輪：查詢、篩選與 Context 組裝。
+QUERY_REWRITE_ENABLED = True
+MAX_CHUNKS_PER_SOURCE = 2
+CONTEXT_SIMILARITY_THRESHOLD = 0.85
+MAX_CONTEXT_CHARACTERS = 8000
+FILTERABLE_METADATA_FIELDS = {
+    "root_source",
+    "relative_path",
+    "project",
+    "module",
+    "week",
+    "file_type",
+    "folder_name",
+}
+
+# 第三輪：批次索引。
+EMBEDDING_BATCH_SIZE = 16
+CHROMA_BATCH_SIZE = 64
+INDEX_SCHEMA_VERSION = 2
+
+# 第四輪：Parent-Child Retrieval。
+PARENT_CHUNK_SIZE = 1800
+CHILD_CHUNK_SIZE = 600
+CHILD_CHUNK_OVERLAP = 100
 
 SUPPORTED_EXTENSIONS = {
     ".txt",

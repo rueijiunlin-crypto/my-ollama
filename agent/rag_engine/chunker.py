@@ -1,6 +1,9 @@
 import ast
+import hashlib
 import re
 from typing import Any
+
+from config import CHILD_CHUNK_OVERLAP, CHILD_CHUNK_SIZE, PARENT_CHUNK_SIZE
 
 
 def split_text(text: str, chunk_size: int = 800, overlap: int = 150) -> list[str]:
@@ -284,6 +287,51 @@ def chunk_document(text: str, file_type: str) -> list[str]:
         return split_text_by_paragraph(text)
 
     return split_text(text)
+
+
+def create_parent_child_chunks(
+    text: str,
+    file_type: str,
+    file_hash_prefix: str,
+) -> list[dict[str, Any]]:
+    """建立精準檢索用 Child 與完整回答用 Parent 的對應資料。"""
+    structural_parents = chunk_document(text, file_type)
+    parents: list[str] = []
+
+    for parent in structural_parents:
+        if len(parent) <= PARENT_CHUNK_SIZE:
+            parents.append(parent)
+        else:
+            parents.extend(
+                split_text(
+                    parent,
+                    chunk_size=PARENT_CHUNK_SIZE,
+                    overlap=min(150, PARENT_CHUNK_SIZE // 5),
+                )
+            )
+
+    records: list[dict[str, Any]] = []
+    for parent_index, parent_text in enumerate(parents):
+        parent_digest = hashlib.sha256(parent_text.encode("utf-8")).hexdigest()[:12]
+        parent_id = f"{file_hash_prefix}_p{parent_index}_{parent_digest}"
+        child_chunks = split_text(
+            parent_text,
+            chunk_size=CHILD_CHUNK_SIZE,
+            overlap=CHILD_CHUNK_OVERLAP,
+        )
+
+        for child_index, child_text in enumerate(child_chunks):
+            records.append(
+                {
+                    "parent_id": parent_id,
+                    "parent_index": parent_index,
+                    "parent_text": parent_text,
+                    "child_index": child_index,
+                    "child_text": child_text,
+                }
+            )
+
+    return records
 
 
 def _markdown_section_title(text_before_chunk: str) -> str | None:

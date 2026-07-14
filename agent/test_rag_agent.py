@@ -4,22 +4,31 @@ from pathlib import Path
 
 os.environ["RAG_AGENT_SKIP_MODEL_LOAD"] = "1"
 
-from rag_engine.chunker import split_markdown, split_python
+from rag_engine.chunker import (
+    create_parent_child_chunks,
+    split_markdown,
+    split_python,
+)
 from rag_engine.citation import append_source_list, format_source_list
 from rag_engine.formatter import format_context
 from rag_engine import retriever
+from rag_engine import file_reader, indexer, knowledge_manager
 from rag_engine.manifest import scan_source_files
 from rag_engine.path_filter import is_excluded_path
 from rag_engine.retriever import (
     bm25_search,
     evaluate_retrieval_quality,
+    invalidate_bm25_cache,
+    metadata_matches,
     keyword_score,
     normalize_scores,
     retrieve_docs,
+    select_diverse_results,
     tokenize_for_bm25,
     tokenize_text,
 )
 from llm import ollama_client
+from main import format_main_help, format_qa_help
 
 
 def test_split_markdown() -> None:
@@ -332,6 +341,323 @@ def test_ollama_health_check_finds_configured_model() -> None:
     assert ollama_client.MODEL in health["message"]
 
 
+def test_query_rewrite_uses_recent_context() -> None:
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {"response": "Token 與 Embedding 有什麼差別？"}
+
+    class FakeRequests:
+        class RequestException(Exception):
+            pass
+
+        @staticmethod
+        def post(url: str, json: dict, timeout: float):
+            assert "Token 是什麼" in json["prompt"]
+            assert timeout > 0
+            return FakeResponse()
+
+    original_requests = ollama_client.requests
+    ollama_client.requests = FakeRequests
+    try:
+        rewritten = ollama_client.rewrite_query(
+            "那它跟 Embedding 有什麼差別？",
+            [{"question": "Token 是什麼？", "answer": "Token 是文字單位。"}],
+        )
+    finally:
+        ollama_client.requests = original_requests
+
+    assert rewritten == "Token 與 Embedding 有什麼差別？"
+
+
+def test_metadata_filter() -> None:
+    metadata = {
+        "week": "Week03",
+        "file_type": ".py",
+        "root_source": "learning",
+    }
+    assert metadata_matches(metadata, {"week": "week03"})
+    assert metadata_matches(metadata, {"file_type": "py"})
+    assert not metadata_matches(metadata, {"week": "Week01"})
+    assert metadata_matches(metadata, {"unsupported": "ignored"})
+
+
+def test_parent_child_chunking() -> None:
+    text = "# Transformer\n\n" + ("Self Attention 會計算權重。" * 100)
+    records = create_parent_child_chunks(text, ".md", "abc123")
+    assert len(records) >= 2
+    assert all(record["parent_id"].startswith("abc123_p") for record in records)
+    assert all(record["child_text"] in record["parent_text"] for record in records)
+    assert len({record["parent_id"] for record in records}) >= 1
+
+
+def test_context_diversity_and_parent_expansion() -> None:
+    results = [
+        {
+            "document": "child one",
+            "metadata": {
+                "source_path": "a.md",
+                "parent_id": "p1",
+                "parent_text": "parent one complete context",
+            },
+            "final_score": 1.0,
+        },
+        {
+            "document": "child two",
+            "metadata": {
+                "source_path": "a.md",
+                "parent_id": "p1",
+                "parent_text": "parent one complete context",
+            },
+            "final_score": 0.9,
+        },
+        {
+            "document": "different child",
+            "metadata": {
+                "source_path": "b.md",
+                "parent_id": "p2",
+                "parent_text": "different parent context",
+            },
+            "final_score": 0.8,
+        },
+    ]
+    selected = select_diverse_results(results)
+    assert len(selected) == 2
+    assert selected[0]["document"] == "parent one complete context"
+    assert selected[0]["matched_child"] == "child one"
+    assert "parent_text" not in selected[0]["metadata"]
+
+
+def test_bm25_cache_avoids_reloading_documents() -> None:
+    class CountingCollection(FakeCollection):
+        def __init__(self):
+            self.get_calls = 0
+
+        def get(self, include=None):
+            self.get_calls += 1
+            return super().get(include=include)
+
+    collection = CountingCollection()
+    original_get_collection = retriever.get_collection
+    retriever.get_collection = lambda: collection
+    invalidate_bm25_cache()
+    try:
+        bm25_search("build_index")
+        bm25_search("chunks")
+    finally:
+        retriever.get_collection = original_get_collection
+        invalidate_bm25_cache()
+
+    assert collection.get_calls == 1
+
+
+def test_batch_add_rolls_back_partial_write() -> None:
+    class FailingCollection:
+        def __init__(self):
+            self.calls = 0
+
+        def add(self, **kwargs):
+            self.calls += 1
+            if self.calls == 2:
+                raise RuntimeError("simulated failure")
+
+    records = [
+        {"id": f"id-{index}", "document": f"doc-{index}", "metadata": {"i": index}}
+        for index in range(65)
+    ]
+    collection = FailingCollection()
+    deleted: list[str] = []
+    original_get_collection = indexer.get_collection
+    original_encode_texts = indexer.encode_texts
+    original_delete = indexer.delete_file_chunks
+    indexer.get_collection = lambda: collection
+    indexer.encode_texts = lambda texts, batch_size: [[0.1] for _ in texts]
+    indexer.delete_file_chunks = lambda ids: deleted.extend(ids) or True
+    try:
+        success = indexer._add_records(records)
+    finally:
+        indexer.get_collection = original_get_collection
+        indexer.encode_texts = original_encode_texts
+        indexer.delete_file_chunks = original_delete
+
+    assert success is False
+    assert len(deleted) == 64
+
+
+def test_parent_child_ids_are_unique_across_pdf_pages() -> None:
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        path = Path(temporary_directory) / "paper.pdf"
+        path.write_bytes(b"fake pdf")
+        docs = [
+            {
+                "path": path,
+                "text": "第一頁內容 " * 100,
+                "metadata": {"file_type": ".pdf", "page_number": 1},
+            },
+            {
+                "path": path,
+                "text": "第二頁內容 " * 100,
+                "metadata": {"file_type": ".pdf", "page_number": 2},
+            },
+        ]
+        original_read = indexer.read_single_file
+        indexer.read_single_file = lambda source_path: docs
+        try:
+            prepared = indexer._prepare_single_file(path, "a" * 64)
+        finally:
+            indexer.read_single_file = original_read
+
+    assert prepared is not None
+    _, records = prepared
+    ids = [record["id"] for record in records]
+    assert len(ids) == len(set(ids))
+    assert any("_d0_" in item for item in ids)
+    assert any("_d1_" in item for item in ids)
+
+
+def test_incremental_update_adds_new_before_deleting_old() -> None:
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        path = Path(temporary_directory) / "notes.md"
+        path.write_text("new content", encoding="utf-8")
+        manifest_path = Path(temporary_directory) / "index_manifest.json"
+        manifest_path.write_text("{}", encoding="utf-8")
+        manifest = {
+            "embedding_model": indexer.EMBEDDING_MODEL,
+            "collection_name": indexer.COLLECTION_NAME,
+            "index_schema_version": indexer.INDEX_SCHEMA_VERSION,
+            "data_dirs": [],
+            "files": {
+                str(path): {
+                    "sha256": "old",
+                    "chunk_ids": ["old-id"],
+                }
+            },
+        }
+        events: list[str] = []
+
+        originals = {
+            "manifest_path": indexer.MANIFEST_PATH,
+            "load_manifest": indexer.load_manifest,
+            "save_manifest": indexer.save_manifest,
+            "scan_source_files": indexer.scan_source_files,
+            "calculate_file_sha256": indexer.calculate_file_sha256,
+            "index_single_file": indexer.index_single_file,
+            "delete_file_chunks": indexer.delete_file_chunks,
+            "invalidate": indexer._invalidate_retrieval_cache,
+        }
+        indexer.MANIFEST_PATH = manifest_path
+        indexer.load_manifest = lambda: manifest
+        indexer.save_manifest = lambda value: events.append("save")
+        indexer.scan_source_files = lambda folders: [path]
+        indexer.calculate_file_sha256 = lambda source_path: "new"
+        indexer.index_single_file = lambda source_path, sha: (
+            events.append("add_new")
+            or {"sha256": sha, "chunk_ids": ["new-id"], "parent_count": 1}
+        )
+        indexer.delete_file_chunks = lambda ids: events.append(f"delete:{ids[0]}") or True
+        indexer._invalidate_retrieval_cache = lambda: None
+        try:
+            success = indexer.build_index(full_rebuild=False)
+        finally:
+            indexer.MANIFEST_PATH = originals["manifest_path"]
+            indexer.load_manifest = originals["load_manifest"]
+            indexer.save_manifest = originals["save_manifest"]
+            indexer.scan_source_files = originals["scan_source_files"]
+            indexer.calculate_file_sha256 = originals["calculate_file_sha256"]
+            indexer.index_single_file = originals["index_single_file"]
+            indexer.delete_file_chunks = originals["delete_file_chunks"]
+            indexer._invalidate_retrieval_cache = originals["invalidate"]
+
+    assert success is True
+    assert events.index("add_new") < events.index("delete:old-id")
+    assert events[-1] == "save"
+
+
+def test_full_rebuild_stops_when_clear_fails() -> None:
+    original_clear = indexer.clear_collection
+    indexer.clear_collection = lambda: False
+    try:
+        assert indexer.build_index(full_rebuild=True) is False
+    finally:
+        indexer.clear_collection = original_clear
+
+
+def test_knowledge_manager_status() -> None:
+    manifest = {
+        "embedding_model": "BAAI/bge-m3",
+        "collection_name": "test_collection",
+        "data_dirs": ["knowledge_base"],
+        "files": {
+            "knowledge_base/notes.md": {
+                "indexed_at": "2026-07-14 10:00:00",
+                "parent_count": 2,
+            }
+        },
+    }
+
+    class CountCollection:
+        def count(self) -> int:
+            return 4
+
+    original_load = knowledge_manager.load_manifest
+    original_collection = knowledge_manager.get_collection
+    knowledge_manager.load_manifest = lambda: manifest
+    knowledge_manager.get_collection = lambda: CountCollection()
+    try:
+        status = knowledge_manager.get_knowledge_status()
+        output = knowledge_manager.format_knowledge_status(status)
+    finally:
+        knowledge_manager.load_manifest = original_load
+        knowledge_manager.get_collection = original_collection
+
+    assert status["file_count"] == 1
+    assert status["chunk_count"] == 4
+    assert status["parent_count"] == 2
+    assert "索引文件數：1" in output
+
+
+def test_pdf_extraction_report_metadata() -> None:
+    class FakePage:
+        def __init__(self, text: str):
+            self.text = text
+
+        def extract_text(self) -> str:
+            return self.text
+
+    class FakeReader:
+        def __init__(self, path: str):
+            self.pages = [FakePage("有效內容"), FakePage("")]
+
+    original_reader = file_reader.PdfReader
+    file_reader.PdfReader = FakeReader
+    try:
+        docs = file_reader._read_pdf_pages(
+            Path("paper.pdf"),
+            {"file_name": "paper.pdf", "file_type": ".pdf"},
+        )
+    finally:
+        file_reader.PdfReader = original_reader
+
+    assert len(docs) == 1
+    assert docs[0]["metadata"]["page_number"] == 1
+    assert docs[0]["metadata"]["pdf_total_pages"] == 2
+
+
+def test_help_guides() -> None:
+    main_help = format_main_help()
+    qa_help = format_qa_help()
+    manager_help = knowledge_manager.format_knowledge_manager_help()
+
+    assert "help" in main_help
+    assert "q" in main_help
+    assert "filter show" in qa_help
+    assert "filter week Week03" in qa_help
+    assert "clip" in manager_help
+    assert "Week03" in manager_help
+
+
 def main() -> None:
     test_split_markdown()
     test_split_python()
@@ -349,6 +675,18 @@ def main() -> None:
     test_retrieval_quality_accepts_semantic_evidence()
     test_retrieval_quality_rejects_weak_evidence()
     test_ollama_health_check_finds_configured_model()
+    test_query_rewrite_uses_recent_context()
+    test_metadata_filter()
+    test_parent_child_chunking()
+    test_context_diversity_and_parent_expansion()
+    test_bm25_cache_avoids_reloading_documents()
+    test_batch_add_rolls_back_partial_write()
+    test_parent_child_ids_are_unique_across_pdf_pages()
+    test_incremental_update_adds_new_before_deleting_old()
+    test_full_rebuild_stops_when_clear_fails()
+    test_knowledge_manager_status()
+    test_pdf_extraction_report_metadata()
+    test_help_guides()
     print("All tests passed.")
 
 

@@ -39,6 +39,16 @@ AI Agent。回答會先檢索本機文件，再交由 Ollama 中的模型生成�
 - [x] `[來源 N]` 引用系統
 - [x] 低品質檢索拒答機制
 - [x] CPU／CUDA 自動選擇與執行環境顯示
+- [x] 依最近對話進行 Query Rewrite
+- [x] Metadata Filter
+- [x] Context 去重、來源多樣性與長度限制
+- [x] BM25 Corpus Cache
+- [x] 批次 Embedding 與 ChromaDB 寫入
+- [x] 原子式增量索引更新
+- [x] 完整重建清除失敗時中止
+- [x] Parent-Child Retrieval
+- [x] Knowledge Manager
+- [x] PDF 文字擷取品質報告
 
 ## 系統流程
 
@@ -52,7 +62,10 @@ File Reader
 Structure-aware Chunking
    │
    ▼
-BGE-M3 Embedding
+Parent Chunk / Child Chunk
+   │
+   ▼
+Child Batch Embedding
    │
    ▼
 ChromaDB
@@ -65,6 +78,12 @@ ChromaDB
           │
           ▼
  BGE Reranker + Keyword Bonus
+          │
+          ▼
+ Context 去重與來源多樣性
+          │
+          ▼
+  Parent Context Expansion
           │
           ▼
    檢索品質判定
@@ -97,6 +116,7 @@ AI_Server/
 │   │   ├── file_reader.py      # 文件讀取
 │   │   ├── formatter.py        # Context 格式化
 │   │   ├── indexer.py          # 增量與完整索引
+│   │   ├── knowledge_manager.py # 知識庫狀態與文件清單
 │   │   ├── manifest.py         # 檔案雜湊與索引紀錄
 │   │   ├── models.py           # Embedding、Reranker、ChromaDB
 │   │   ├── path_filter.py      # 掃描排除規則
@@ -123,7 +143,9 @@ AI_Server/
 - YAML：`.yaml`、`.yml`
 - Jupyter Notebook：`.ipynb`
 
-目前 PDF 使用文字層擷取，不包含 OCR。掃描型 PDF 可能無法取得內容。
+目前 PDF 使用文字層擷取，不包含 OCR。索引時會顯示總頁數、成功擷取
+頁數、空白頁數及平均字數；掃描型 PDF 可能無法取得內容，系統會在
+有效頁面比例偏低時提示可能需要 OCR。
 
 ## 環境需求
 
@@ -272,10 +294,12 @@ python agent\main.py
 主選單：
 
 ```text
-=== NKUST Local RAG Agent v0.6 ===
+=== NKUST Local RAG Agent v0.9 ===
 1. 增量更新索引
 2. 完整重建索引
 3. 進入常駐問答模式
+4. Knowledge Manager
+help. 使用指南
 q. 離開
 ```
 
@@ -296,13 +320,68 @@ q. 離開
 ### 問答模式指令
 
 | 指令 | 功能 |
-|---|---|
+| --- | --- |
+| `help` 或 `?` | 顯示問答模式完整使用指南與 Filter 範例 |
 | `back` | 回到主選單 |
 | `rebuild` | 增量更新索引 |
 | `full_rebuild` | 完整重建索引 |
 | `memory` | 顯示最近對話 |
 | `clear_memory` | 清空目前工作階段記憶 |
+| `filter show` | 顯示目前 Metadata Filter |
+| `filter <欄位> <值>` | 設定 Metadata Filter |
+| `filter clear` | 清除所有 Metadata Filter |
 | `q` | 離開程式 |
+
+可篩選欄位包括：
+
+```text
+root_source
+relative_path
+project
+module
+week
+file_type
+folder_name
+```
+
+例如：
+
+```text
+filter week Week03
+filter file_type py
+filter root_source knowledge_base
+```
+
+### Knowledge Manager
+
+主選單選擇 `4` 後可以：
+
+- 查看索引文件、Parent、Child Chunk 數量
+- 查看資料來源與文件類型統計
+- 查看最近索引時間、Embedding 模型與 Collection
+- 列出全部已索引文件
+- 依檔名或路徑搜尋索引紀錄
+
+Knowledge Manager 內可隨時輸入 `help` 或 `?` 顯示操作指南：
+
+| 選項 | 功能 |
+| --- | --- |
+| `1` | 查看文件數、Parent／Child Chunk、來源、格式與索引時間 |
+| `2` | 列出 Manifest 中全部已索引文件的完整路徑 |
+| `3` | 使用部分檔名或路徑關鍵字搜尋已索引文件 |
+| `help` 或 `?` | 顯示 Knowledge Manager 使用指南 |
+| `back` | 回到主選單 |
+
+選項 `3` 使用範例：
+
+```text
+請選擇功能：3
+請輸入檔名或路徑關鍵字：clip
+```
+
+搜尋不分英文大小寫；輸入 `Week03` 可以尋找路徑中包含 Week03 的文件。
+這項功能只搜尋 Manifest 中的檔名及完整路徑，不會搜尋文件內文。若要搜尋
+文件內容，請回到常駐問答模式直接提問。
 
 ## 索引機制
 
@@ -317,12 +396,32 @@ q. 離開
 未變更檔案 → 跳過
 ```
 
+更新既有文件時會先建立新 Chunk；只有新索引完整寫入成功後才刪除舊
+Chunk。若批次寫入或舊索引刪除失敗，系統會回滾新資料並保留舊索引。
+
 ### 完整重建
 
 完整重建會清除 ChromaDB Collection 內的舊 Chunk、Embedding 與
 Metadata，再重新掃描所有 `DATA_DIRS`。
 
 它不會刪除知識來源中的原始文件。
+
+如果清除舊 Collection 失敗，完整重建會立即中止，不會將新舊資料混合。
+
+目前索引 Schema 為版本 2。舊版索引不包含 Parent-Child 與新增 Metadata，
+升級後第一次執行會要求完整重建。
+
+### 批次索引
+
+文件會先在記憶體建立 Child Chunk 與 Metadata，再使用批次 Embedding
+與批次 ChromaDB 寫入，降低逐 Chunk 呼叫 GPU 與資料庫的額外成本。
+
+預設參數位於 `agent/config.py`：
+
+```python
+EMBEDDING_BATCH_SIZE = 16
+CHROMA_BATCH_SIZE = 64
+```
 
 ## 檢索與回答
 
@@ -338,6 +437,35 @@ Metadata，再重新掃描所有 `DATA_DIRS`。
 
 BM25 分數為 `0` 不一定代表文件不相關，也可能表示該 Chunk 只由
 Vector Search 找到，沒有進入 BM25 Top K。
+
+BM25 Corpus 會在第一次查詢時建立快取。增量更新或完整重建完成後會
+自動失效並在下次查詢重建，不會每次問題都重新讀取全部 ChromaDB。
+
+### Query Rewrite
+
+若目前工作階段已有最近對話，系統會先將依賴前文的問題改寫成可獨立
+檢索的問題：
+
+```text
+上一題：Token 是什麼？
+本輪：那它跟 Embedding 有什麼差別？
+改寫：Token 與 Embedding 有什麼差別？
+```
+
+改寫只用於檢索，最終回答仍以使用者原始問題與檢索證據為準。改寫失敗
+時會自動退回原始問題。
+
+### Parent-Child Retrieval
+
+索引會建立兩種邏輯單位：
+
+```text
+Child Chunk：較小，用於精準 Vector／BM25 搜尋與 Rerank
+Parent Chunk：較完整，命中 Child 後提供給回答模型
+```
+
+同一 Parent 的多個 Child 不會重複占用 Context。系統也會限制單一來源
+最多提供的 Chunk 數、移除高度相似內容，並控制 Context 總長度。
 
 ### 引用來源
 
@@ -398,6 +526,16 @@ python agent\test_rag_agent.py
 - Citation 來源格式
 - 檢索品質接受／拒絕判定
 - Ollama 健康檢查
+- Query Rewrite fallback 與最近對話改寫
+- Metadata Filter 正規化與比對
+- Parent-Child ID 與 Parent Context 展開
+- Context 去重與來源多樣性
+- BM25 Cache 重用與失效
+- 批次寫入失敗回滾
+- 增量更新先新增、後刪舊的操作順序
+- 完整重建清除失敗時中止
+- Knowledge Manager 統計
+- PDF 擷取品質 Metadata
 
 成功時會顯示：
 
@@ -431,10 +569,11 @@ knowledge_base/*
 
 - PDF 尚未支援 OCR 與複雜表格重建
 - 對話記憶只存在目前執行期間，關閉程式後會消失
-- BM25 Corpus 目前可能在每次查詢時重建，資料量大時會變慢
-- 檢索結果尚未進行相似 Chunk 去重與來源多樣性控制
-- 增量更新尚未提供完整交易式／原子式保護
-- 尚未支援 Query Rewrite、Metadata Filter 與 Parent-Child Retrieval
+- Query Rewrite 目前會額外呼叫一次 Ollama，可能增加追問延遲
+- Metadata Filter 目前使用精確值比對，尚未支援範圍與模糊條件
+- Parent 內容目前儲存在 Child Metadata 中，會增加 ChromaDB 空間用量
+- 增量更新已保護單一文件更新順序，但尚未提供跨整批文件的資料庫交易
+- 拒答門檻仍需使用真實問題集持續校準
 - 尚無 Web UI、多使用者、權限管理與長期記憶
 
 ## Roadmap
@@ -461,20 +600,20 @@ knowledge_base/*
 
 ### Phase 3：檢索品質
 
-- [ ] Query Rewrite
-- [ ] Metadata Filter
-- [ ] Context 去重與來源多樣性
-- [ ] Parent-Child Retrieval
+- [x] Query Rewrite
+- [x] Metadata Filter
+- [x] Context 去重與來源多樣性
+- [x] Parent-Child Retrieval
 - [ ] 中英文術語別名／查詢擴展
 
 ### Phase 4：效能與安全
 
-- [ ] BM25 Cache
-- [ ] Batch Embedding
-- [ ] 原子式增量索引更新
-- [ ] 完整重建清除失敗時中止
-- [ ] PDF 擷取品質報告
-- [ ] Knowledge Manager
+- [x] BM25 Cache
+- [x] Batch Embedding
+- [x] 原子式增量索引更新
+- [x] 完整重建清除失敗時中止
+- [x] PDF 擷取品質報告
+- [x] Knowledge Manager
 
 ### Phase 5：應用介面
 

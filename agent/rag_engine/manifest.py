@@ -2,7 +2,14 @@ import hashlib
 import json
 from pathlib import Path
 
-from config import COLLECTION_NAME, DATA_DIRS, EMBEDDING_MODEL, MANIFEST_PATH, SUPPORTED_EXTENSIONS
+from config import (
+    COLLECTION_NAME,
+    DATA_DIRS,
+    EMBEDDING_MODEL,
+    INDEX_SCHEMA_VERSION,
+    MANIFEST_PATH,
+    SUPPORTED_EXTENSIONS,
+)
 from rag_engine.models import get_collection
 from rag_engine.path_filter import iter_source_files
 
@@ -18,6 +25,7 @@ def calculate_file_sha256(path: Path) -> str:
 def create_empty_manifest() -> dict:
     return {
         "embedding_model": EMBEDDING_MODEL,
+        "index_schema_version": INDEX_SCHEMA_VERSION,
         "collection_name": COLLECTION_NAME,
         "data_dirs": [str(path) for path in DATA_DIRS],
         "files": {},
@@ -46,6 +54,7 @@ def load_manifest() -> dict:
         return create_empty_manifest()
 
     manifest.setdefault("embedding_model", EMBEDDING_MODEL)
+    manifest.setdefault("index_schema_version", 1)
     manifest.setdefault("collection_name", COLLECTION_NAME)
     manifest.setdefault("data_dirs", [str(path) for path in DATA_DIRS])
     manifest.setdefault("files", {})
@@ -53,10 +62,12 @@ def load_manifest() -> dict:
 
 
 def save_manifest(manifest: dict) -> None:
-    MANIFEST_PATH.write_text(
+    temporary_path = MANIFEST_PATH.with_suffix(".tmp")
+    temporary_path.write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    temporary_path.replace(MANIFEST_PATH)
 
 
 def scan_source_files(folders: list[Path]) -> list[Path]:
@@ -74,11 +85,13 @@ def scan_source_files(folders: list[Path]) -> list[Path]:
     return sorted(files, key=lambda item: str(item).lower())
 
 
-def delete_file_chunks(chunk_ids: list[str]) -> None:
+def delete_file_chunks(chunk_ids: list[str]) -> bool:
     if not chunk_ids:
-        return
+        return True
 
     try:
         get_collection().delete(ids=chunk_ids)
+        return True
     except Exception as exc:
         print(f"刪除舊 chunks 時發生警告：{exc}")
+        return False
